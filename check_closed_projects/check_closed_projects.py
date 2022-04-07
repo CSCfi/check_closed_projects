@@ -13,6 +13,10 @@ import click_config_file
 from logging.handlers import SysLogHandler, RotatingFileHandler
 import functools
 import ldap
+from keystoneauth1 import session
+from keystoneauth1.identity import v3
+from keystoneclient.v3 import client as keystoneclient_v3
+import re
 
 
 def cached_property(name):
@@ -90,7 +94,10 @@ class check_closed_projects:
         self.get_projects_from_ldap()
         # for project in self.projects_from_ldap:
         #     self._log.info(f"Project '{project[1]['cn']}'")
-        self.get_projects_from_file()
+        if self.projects_file is not None:
+            self.get_projects_from_file()
+        else:
+            self.get_projects_from_os()
         self.compare_projects()
 
     def connect_ldap(self):
@@ -118,21 +125,73 @@ class check_closed_projects:
                 self.projects_from_ldap[cn][key] = project[1][key][0].decode()
 
     def get_projects_from_file(self):
-        self.projects_from_file = []
+        self.projects_from_os = []
         with open(self.projects_file, 'r') as projects_file:
             for line in projects_file.readlines():
-                self.projects_from_file.append(line.strip('\n'))
+                self.projects_from_os.append(line.strip('\n'))
+
+    def get_projects_from_os(self):
+        self._os_auth()
+        os_projects = self.keystone.projects.list()
+        self.projects_from_os = []
+        for project in os_projects:
+            if not project.enabled:
+                self.projects_from_os.append(project.name)
+
+    def _get_credentials(self):
+        """
+        Load login information from file (if given) or environment
+        :returns: credentials
+        :rtype: dict
+        """
+        cred = dict()
+        if self.os_source_file is not None:
+            with open(self.os_source_file, 'r') as source_file:
+                for line in source_file.readlines():
+                    line = line.strip('\n')
+                    line = re.sub('#.*$', '', line)
+                    match = re.match(r'^export ', line)
+                    if match:
+                        line = re.sub('^export ', '', line)
+                        variable, value = line.split('=')
+                        os.environ[variable] = value
+        cred['auth_url'] = os.environ.get('OS_AUTH_URL',
+                                          '').replace("v2.0",
+                                                      "v3")
+        cred['username'] = os.environ.get('OS_USERNAME', '')
+        cred['password'] = os.environ.get('OS_PASSWORD', '')
+        cred['project_id'] = os.environ.get('OS_PROJECT_ID',
+                                            os.environ.get('OS_TENANT_ID',
+                                                           ''))
+        cred['user_domain_name'] = os.environ.get('OS_USER_DOMAIN_NAME',
+                                                  'default')
+        for key in cred:
+            if cred[key] == '':
+                self._log.critical(f"Credentials not loaded into environment \
+({key} = '{cred[key]}'): Did you load the RC file?")
+                exit(1)
+        return cred
+
+    def _os_auth(self):
+        self.keystone_session = session.Session(
+            auth=v3.Password(**self._get_credentials()))
+        self.keystone_v3 = keystoneclient_v3.Client(
+            session=self.keystone_session)
+        self.keystone = keystoneclient_v3.Client(
+            session=self.keystone_session)
 
     def compare_projects(self):
-        self._log.debug(f"Comparing {len(self.projects_from_file)} projects \
-in your file with {len(self.projects_from_ldap)} projects from LDAP...")
+        self._log.debug(f"Comparing {len(self.projects_from_os)} projects \
+from OpenStack with {len(self.projects_from_ldap)} projects from LDAP...")
         not_closed = 0
         state = self.state_attribute
-        for project in self.projects_from_file:
+        for project in self.projects_from_os:
             if project not in self.projects_from_ldap:
-                self._log.warning(f"Project '{project}' is not in LDAP")
+                self._log.warning(f"Project '{project}' closed in OpenStack \
+is not in LDAP")
             elif self.projects_from_ldap[project][state] != 'closed':
-                self._log.warning(f"Project '{project}' is not closed in LDAP")
+                self._log.warning(f"Project '{project}' closed in Openstack \
+is not closed in LDAP")
                 not_closed += 1
         if not_closed == 0:
             self._log.info('All projects are closed in LDAP.')
@@ -192,25 +251,25 @@ in your file with {len(self.projects_from_ldap)} projects from LDAP...")
 #               help="Don't do anything, just show what would be done.")
 # Don't forget to add dummy to parameters of main function
 @click.option('--os-source-file', '-s', required=False,
-              help='Source file from OpenStack with credentials')
+              help='''Source file from OpenStack with credentials. If not
+provided environmental variables will be checked.''')
 @click.option('--ldap-host', '-h', required=True,
-              help='LDAP server hostname or IP')
+              help='LDAP server hostname or IP.')
 @click.option('--ldap-port', '-p', required=False, default=636,
-              help='LDAP server port')
+              help='LDAP server port.')
 @click.option('--ldap-user', '-u', required=False,
-              help='LDAP user')
+              help='LDAP user.')
 @click.option('--ldap-password', '-P', required=False,
               help='''Warning! Avoid passing the password in the command line
 and use a configuration file for this LDAP user password.''')
 @click.option('--ldap-base-dn', '-d', required=True,
-              help='LDAP base DN')
+              help='LDAP base DN.')
 @click.option('--ldap-search-filter', '-f', default='objectClass=Project',
-              help='LDAP search filter to use')
+              help='LDAP search filter to use.')
 @click.option('--ldap-state-attribute', '-a', default='state',
-              help='LDAP attribute that indicate the closed state')
-@click.option('--projects-file', '-o', required=True,
-              help='''File with a list of project numbers as shown in
-LDAP "project_<number>"''')
+              help='LDAP attribute that indicate the closed state.')
+@click.option('--projects-file', '-o', required=False,
+              help='''File with a list of project names as shown in LDAP."''')
 @click_config_file.configuration_option()
 def __main__(debug_level, log_file, os_source_file, ldap_host, ldap_port,
              ldap_user, ldap_password, ldap_base_dn, ldap_search_filter,
