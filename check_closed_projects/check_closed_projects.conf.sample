@@ -1,0 +1,8 @@
+ldap_base_dn="OU=Projects,dc=example,dc=org"
+ldap_user="uid=ldapuser,ou=Users,dc=example,dc=org"
+ldap_host="ldap.example.org"
+ldap_password="Sup3r-S3cr3t-P4ssw0rd!"
+os_source_file="/home/user/os-openrc.sh"
+#projects_file="projects_list.conf"
+ldap_search_filter="objectClass=Project"
+ldap_state_attribute="ProjectState"
