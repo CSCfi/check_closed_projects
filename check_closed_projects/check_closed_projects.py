@@ -206,7 +206,7 @@ class check_closed_projects:
         for key in cred:
             if cred[key] == '':
                 self._log.critical(f"Credentials not loaded into environment \
-({key} = '{cred[key]}'): Did you load the RC file?")
+({key} = '{cred[key]}'): Did you load the OpenStack RC file?")
                 exit(1)
         return cred
 
