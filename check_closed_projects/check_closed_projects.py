@@ -380,7 +380,7 @@ them in memory...')
         ips = list()
         for ip in all_floating_ips:
             if project_id and ip['project_id'] == project_id:
-                ips.appen(ip)
+                ips.append(ip)
         return ips
 
     def _get_os_security_groups(self, project_id=None):
