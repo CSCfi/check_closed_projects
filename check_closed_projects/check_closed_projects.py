@@ -103,9 +103,6 @@ class check_closed_projects:
             self.get_projects_from_file()
         else:
             self.get_ldap_projects()
-        import json
-        with open('ldap.json', 'w') as fp:
-            fp.write(json.dumps(self.ldap_projects, indent=2))
 
         self.compare_projects()
 
