@@ -75,7 +75,8 @@ class check_closed_projects:
                  ldap_port, ldap_user, ldap_password, ldap_base_dn,
                  ldap_search_filter, ldap_state_attribute,
                  ldap_id_attributes, projects_file,
-                 ldap_discrepancies_file, os_discrepancies_file):
+                 ldap_discrepancies_file, os_discrepancies_file,
+                 resources_discrepancies_file):
         ''' Initial function called when object is created '''
         self.debug_level = debug_level
         if log_file is None:
@@ -100,6 +101,7 @@ class check_closed_projects:
         self.projects_file = projects_file
         self.ldap_discrepancies_file = ldap_discrepancies_file
         self.os_discrepancies_file = os_discrepancies_file
+        self.resources_discrepancies_file = resources_discrepancies_file
 
         self.connect_ldap()
         self.get_os_projects()
@@ -254,8 +256,8 @@ Openstack is not closed in LDAP")
         if len(not_closed) == 0:
             self._log.info('All projects are closed in LDAP.')
         else:
-            with open(self.ldap_discrepancies_file, 'w') as filepointer:
-                filepointer.write(json.dumps(not_closed, indent=2))
+            with open(self.ldap_discrepancies_file, 'w') as fileh:
+                fileh.write(json.dumps(not_closed, indent=2))
             self._log.warning(f"{len(not_closed)} projects are not closed in \
 LDAP. Saved in '{self.ldap_discrepancies_file}'.")
 
@@ -277,50 +279,59 @@ OpenStack.')
             for os_project in not_disabled:
                 self._log.warning(f"OpenStack project '{os_project['name']}' \
 closed in LDAP is not disabled in OpenStack")
-            with open(self.os_discrepancies_file, 'w') as filepointer:
-                filepointer.write(json.dumps(not_disabled, indent=2))
+            with open(self.os_discrepancies_file, 'w') as fileh:
+                fileh.write(json.dumps(not_disabled, indent=2))
             self._log.warning(f"{len(not_disabled)} projects from LDAP are not \
 disabled in OpenStack. Saved in '{self.os_discrepancies_file}'.")
         self.os_projects_not_disabled = not_disabled
 
     def check_os_projects_resources(self):
-        self._log.debug('Checking disabled projects in OpenStack for resources \
-used...')
+        self._log.debug('Checking disabled projects in OpenStack for used \
+resources ...')
         for os_project in self.os_projects:
-            self._log.debug(f"Checking project '{os_project['name']}' \
-({os_project['id']})...")
             if self.projects_file is not None or not os_project['enabled']:
+                self._log.debug(f"Checking project '{os_project['name']}' \
+({os_project['id']})...")
                 search_opts = {
                     "project_id": os_project['id'],
                     "all_tenants": True
                 }
+                discrepancies = {}
 
                 self._log.debug('Checking servers...')
                 servers = self._get_os_instances(search_opts=search_opts)
                 if len(servers) > 0:
                     self._log.warning(f"{len(servers)} servers in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['servers'] = servers
 
                 self._log.debug('Checking volumes...')
                 volumes = self._get_os_volumes(search_opts=search_opts)
                 if len(volumes) > 0:
-                    self._log.debug('Checking snapshots...')
+                    self._log.warning(f"{len(volumes)} volumes in disabled \
+project {os_project['name']} ({os_project['id']}")
+                    discrepancies['volumes'] = volumes
+
+                self._log.debug('Checking snapshots...')
                 snapshots = self._get_os_snapshots(search_opts=search_opts)
                 if len(snapshots) > 0:
                     self._log.warning(f"{len(snapshots)} snapshots in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['snapshots'] = snapshots
 
                 self._log.debug('Checking images...')
                 images = self._get_os_images(owner=os_project['id'])
                 if len(images) > 0:
                     self._log.warning(f"{len(images)} images in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['images'] = images
 
                 self._log.debug('Checking floating IPs...')
                 ips = self._get_os_floating_ip(project_id=os_project['id'])
                 if len(ips) > 0:
                     self._log.warning(f"{len(ips)} IPs in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['floating_ips'] = ips
 
                 self._log.debug('Checking security groups...')
                 sec_grps = self._get_os_security_groups(
@@ -329,18 +340,21 @@ project {os_project['name']} ({os_project['id']})")
                 if len(sec_grps) > 1:
                     self._log.warning(f"{len(sec_grps)} security groups in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['security_groups'] = sec_grps
 
                 self._log.debug('Checking routers...')
                 routers = self._get_os_routers(project_id=os_project['id'])
                 if len(routers) > 0:
                     self._log.warning(f"{len(routers)} routers in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['routers'] = routers
 
                 self._log.debug('Checking networks...')
                 networks = self._get_os_networks(project_id=os_project['id'])
                 if len(networks) > 0:
                     self._log.warning(f"{len(networks)} networks in disabled \
 project {os_project['name']} ({os_project['id']})")
+                    discrepancies['networks'] = networks
 
                 self._log.debug('Checking roles...')
                 roles = self._get_os_roles(project_id=os_project['id'])
@@ -348,21 +362,42 @@ project {os_project['name']} ({os_project['id']})")
                     self._log.warning(f"{len(roles)} roles in disabled \
 project {os_project['name']} ({os_project['id']}): \
 {', '.join(roles)}")
+                    discrepancies['roles'] = roles
+
+                if len(discrepancies) > 0:
+                    discrepancies['project_name'] = os_project['name']
+                    discrepancies['project_id'] = os_project['id']
+                    # self._log.debug(discrepancies)
+                    filename = self.resources_discrepancies_file.replace(
+                        "%p",
+                        os_project['id']
+                    )
+                    with open(filename, 'w') as fileh:
+                        fileh.write(json.dumps(discrepancies, indent=2))
 
     def _get_os_instances(self, search_opts={"all_tenants": True}):
+        result = []
         server_list = self.nova.servers.list(detailed=True,
                                              search_opts=search_opts)
-        return server_list
+        for server in server_list:
+            result.append({'name': server.name, 'id': server.id})
+        return result
 
     def _get_os_volumes(self, search_opts={"all_tenants": True}):
+        result = []
         vols_list = self.cinder.volumes.list(detailed=True,
                                              search_opts=search_opts)
-        return vols_list
+        for volume in vols_list:
+            result.append({'id': volume.id})
+        return result
 
     def _get_os_snapshots(self, search_opts={"all_tenants": True}):
+        result = []
         snaps_list = self.cinder.volume_snapshots.list(detailed=True,
                                                        search_opts=search_opts)
-        return snaps_list
+        for snap in snaps_list:
+            result.append({'id': snap.id})
+        return result
 
     def _get_os_images(self, owner=None):
         if self.images is None:
@@ -446,14 +481,13 @@ them in memory...')
                 os.mkdir(os.path.dirname(self.log_file))
 
             max_log_size = 102400000
-            filehandler = RotatingFileHandler(self.log_file,
-                                              maxBytes=max_log_size)
+            fileh = RotatingFileHandler(self.log_file, maxBytes=max_log_size)
             # create formatter
             formatter = logging.Formatter('''%(asctime)s %(name)-12s
             %(levelname)-8s %(message)s''')
-            filehandler.setFormatter(formatter)
-            filehandler.setLevel(logging.DEBUG)
-            self._log.addHandler(filehandler)
+            fileh.setFormatter(formatter)
+            fileh.setLevel(logging.DEBUG)
+            self._log.addHandler(fileh)
 
         return True
 
@@ -495,22 +529,29 @@ LDAP.''')
               default='ldap_discrepancies_file.json',
               help='''File to save the list of LDAP projects not closed but
 disabled in OpenStack.''')
-@click.option('--os-discrepancies-file', '-r',
+@click.option('--os-discrepancies-file', '-d',
               default='os_discrepancies_file.json',
               help='''File to save the list of OpenStack projects not disabled but
 closed in LDAP.''')
+@click.option('--resources-discrepancies-file', '-r',
+              default='%p_resources_discrepancies_file.json',
+              help='''Files to save the list of resources discrepancies by
+project (used resources in a project closed in LDAP). Use %p to be replaced
+with project id. Attention! Files will be overwritten.''')
 @click_config_file.configuration_option()
 def __main__(debug_level, log_file, os_source_file, ldap_host, ldap_port,
              ldap_user, ldap_password, ldap_base_dn, ldap_search_filter,
              ldap_state_attribute, ldap_id_attributes, projects_file,
-             ldap_discrepancies_file, os_discrepancies_file):
+             ldap_discrepancies_file, os_discrepancies_file,
+             resources_discrepancies_file):
     return check_closed_projects(debug_level, log_file, os_source_file,
                                  ldap_host, ldap_port, ldap_user,
                                  ldap_password, ldap_base_dn,
                                  ldap_search_filter, ldap_state_attribute,
                                  ldap_id_attributes, projects_file,
                                  ldap_discrepancies_file,
-                                 os_discrepancies_file)
+                                 os_discrepancies_file,
+                                 resources_discrepancies_file)
 
 
 if __name__ == "__main__":
