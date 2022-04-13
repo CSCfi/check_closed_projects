@@ -21,6 +21,7 @@ from neutronclient.neutron import client as neutron
 from cinderclient import client as cinder
 from glanceclient.v2 import client as glance
 import re
+import json
 
 
 def cached_property(name):
@@ -73,7 +74,8 @@ class check_closed_projects:
     def __init__(self, debug_level, log_file, os_source_file, ldap_host,
                  ldap_port, ldap_user, ldap_password, ldap_base_dn,
                  ldap_search_filter, ldap_state_attribute,
-                 ldap_id_attributes, projects_file):
+                 ldap_id_attributes, projects_file,
+                 ldap_discrepancies_file, os_discrepancies_file):
         ''' Initial function called when object is created '''
         self.debug_level = debug_level
         if log_file is None:
@@ -96,6 +98,8 @@ class check_closed_projects:
         self.ldap_id_attributes = ldap_id_attributes
         self.state_attribute = ldap_state_attribute
         self.projects_file = projects_file
+        self.ldap_discrepancies_file = ldap_discrepancies_file
+        self.os_discrepancies_file = os_discrepancies_file
 
         self.connect_ldap()
         self.get_os_projects()
@@ -230,7 +234,7 @@ class check_closed_projects:
         self._log.debug(f"Comparing {len(self.os_projects)} projects \
 from OpenStack with {len(self.ldap_projects)} projects from LDAP (there might \
 be duplicated if you indicated several id attributes)...")
-        not_closed = 0
+        not_closed = list()
         state = self.state_attribute
         for os_project in self.os_projects:
             if (os_project['name'] not in self.ldap_projects and
@@ -241,16 +245,19 @@ OpenStack is not in LDAP")
                   self.ldap_projects[os_project['name']][state] != 'closed'):
                 self._log.warning(f"Project '{os_project['name']}' disabled in \
 Openstack is not closed in LDAP")
-                not_closed += 1
+                not_closed.append(self.ldap_projects[os_project['name']])
             elif os_project['name'] not in self.ldap_projects:
                 self._log.debug("Ignoring project...")
-            else:
-                self._log.debug(f"Opentack Project '{os_project['name']}' \
-it's closed in LDAP ({self.ldap_projects[os_project['name']][state]}).")
-        if not_closed == 0:
+#             else:
+#                 self._log.debug(f"Opentack Project '{os_project['name']}' \
+# it's closed in LDAP ({self.ldap_projects[os_project['name']][state]}).")
+        if len(not_closed) == 0:
             self._log.info('All projects are closed in LDAP.')
         else:
-            self._log.info(f"{not_closed} projects are not closed in LDAP.")
+            with open(self.ldap_discrepancies_file, 'w') as filepointer:
+                filepointer.write(json.dumps(not_closed, indent=2))
+            self._log.warning(f"{len(not_closed)} projects are not closed in \
+LDAP. Saved in '{self.ldap_discrepancies_file}'.")
 
     def compare_ldap_vs_os(self):
         self._log.debug("Comparing from LDAP to OpenStack...")
@@ -270,8 +277,10 @@ OpenStack.')
             for os_project in not_disabled:
                 self._log.warning(f"OpenStack project '{os_project['name']}' \
 closed in LDAP is not disabled in OpenStack")
+            with open(self.os_discrepancies_file, 'w') as filepointer:
+                filepointer.write(json.dumps(not_disabled, indent=2))
             self._log.warning(f"{len(not_disabled)} projects from LDAP are not \
-disabled in OpenStack.")
+disabled in OpenStack. Saved in '{self.os_discrepancies_file}'.")
         self.os_projects_not_disabled = not_disabled
 
     def check_os_projects_resources(self):
@@ -482,15 +491,26 @@ and use a configuration file for this LDAP user password.''')
 LDAP.''')
 @click.option('--projects-file', '-o', required=False,
               help='''File with a list of project names as shown in LDAP."''')
+@click.option('--ldap-discrepancies-file', '-e',
+              default='ldap_discrepancies_file.json',
+              help='''File to save the list of LDAP projects not closed but
+disabled in OpenStack.''')
+@click.option('--os-discrepancies-file', '-r',
+              default='os_discrepancies_file.json',
+              help='''File to save the list of OpenStack projects not disabled but
+closed in LDAP.''')
 @click_config_file.configuration_option()
 def __main__(debug_level, log_file, os_source_file, ldap_host, ldap_port,
              ldap_user, ldap_password, ldap_base_dn, ldap_search_filter,
-             ldap_state_attribute, ldap_id_attributes, projects_file):
+             ldap_state_attribute, ldap_id_attributes, projects_file,
+             ldap_discrepancies_file, os_discrepancies_file):
     return check_closed_projects(debug_level, log_file, os_source_file,
                                  ldap_host, ldap_port, ldap_user,
                                  ldap_password, ldap_base_dn,
                                  ldap_search_filter, ldap_state_attribute,
-                                 ldap_id_attributes, projects_file)
+                                 ldap_id_attributes, projects_file,
+                                 ldap_discrepancies_file,
+                                 os_discrepancies_file)
 
 
 if __name__ == "__main__":
