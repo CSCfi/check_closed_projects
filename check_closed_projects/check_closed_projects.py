@@ -16,6 +16,10 @@ import ldap
 from keystoneauth1 import session
 from keystoneauth1.identity import v3
 from keystoneclient.v3 import client as keystoneclient_v3
+from novaclient import client as nova
+from neutronclient.neutron import client as neutron
+from cinderclient import client as cinder
+from glanceclient.v2 import client as glance
 import re
 
 
@@ -69,7 +73,7 @@ class check_closed_projects:
     def __init__(self, debug_level, log_file, os_source_file, ldap_host,
                  ldap_port, ldap_user, ldap_password, ldap_base_dn,
                  ldap_search_filter, ldap_state_attribute,
-                 projects_file):
+                 ldap_id_attributes, projects_file):
         ''' Initial function called when object is created '''
         self.debug_level = debug_level
         if log_file is None:
@@ -79,6 +83,8 @@ class check_closed_projects:
         self.log_file = log_file
         self._init_log()
         self.ldap_conn = None
+        self.images = None
+        self.ips = None
 
         self.os_source_file = os_source_file
         self.ldap_host = ldap_host
@@ -87,17 +93,20 @@ class check_closed_projects:
         self.ldap_password = ldap_password
         self.ldap_base_dn = ldap_base_dn
         self.ldap_search_filter = ldap_search_filter
+        self.ldap_id_attributes = ldap_id_attributes
         self.state_attribute = ldap_state_attribute
         self.projects_file = projects_file
 
         self.connect_ldap()
-        self.get_projects_from_ldap()
-        # for project in self.projects_from_ldap:
-        #     self._log.info(f"Project '{project[1]['cn']}'")
+        self.get_os_projects()
         if self.projects_file is not None:
             self.get_projects_from_file()
         else:
-            self.get_projects_from_os()
+            self.get_ldap_projects()
+        import json
+        with open('ldap.json', 'w') as fp:
+            fp.write(json.dumps(self.ldap_projects, indent=2))
+
         self.compare_projects()
 
     def connect_ldap(self):
@@ -107,36 +116,64 @@ class check_closed_projects:
                 f"ldaps://{self.ldap_host}:{self.ldap_port}")
             self.ldap_conn.simple_bind_s(self.ldap_user, self.ldap_password)
 
-    def get_projects_from_ldap(self):
+    def get_ldap_projects(self):
         searchScope = ldap.SCOPE_SUBTREE
         searchFilter = self.ldap_search_filter
-        attributes = ['cn', self.state_attribute]
+        attributes = [*self.ldap_id_attributes, self.state_attribute]
         projects = self.ldap_conn.search_s(self.ldap_base_dn, searchScope,
                                            searchFilter, attributes)
         if len(projects) < 1:
             self._log.error(f"""Error testing the LDAP connection.
                 There are no projects (filter='{searchFilter}').""")
             sys.exit(1)
-        self.projects_from_ldap = {}
+        self.ldap_projects = dict()
         for project in projects:
-            cn = project[1]['cn'][0].decode()
-            self.projects_from_ldap[cn] = {}
-            for key in project[1].keys():
-                self.projects_from_ldap[cn][key] = project[1][key][0].decode()
+            for id_attr in self.ldap_id_attributes:
+                cn = project[1][id_attr][0].decode()
+                self.ldap_projects[cn] = {}
+                for key in project[1].keys():
+                    self.ldap_projects[cn][key] = project[1][key][0].decode()
 
     def get_projects_from_file(self):
-        self.projects_from_os = []
+        self.ldap_projects = dict()
         with open(self.projects_file, 'r') as projects_file:
             for line in projects_file.readlines():
-                self.projects_from_os.append(line.strip('\n'))
+                project = line.strip('\n')
+                if project != "":
+                    self.ldap_projects.update(
+                        self.get_project_from_ldap(project)
+                    )
 
-    def get_projects_from_os(self):
+    def get_project_from_ldap(self, project):
+        searchScope = ldap.SCOPE_SUBTREE
+        attributes = [*self.ldap_id_attributes, self.state_attribute]
+        ldap_projects = dict()
+        for id_attr in self.ldap_id_attributes:
+            searchFilter = f"(&({id_attr}={project})\
+({self.ldap_search_filter}))"
+            projects = self.ldap_conn.search_s(self.ldap_base_dn, searchScope,
+                                               searchFilter, attributes)
+            if len(projects) > 0:
+                for proj in projects:
+                    for id_attr in self.ldap_id_attributes:
+                        cn = proj[1][id_attr][0].decode()
+                        ldap_projects[cn] = dict()
+                        for key in proj[1].keys():
+                            ldap_projects[cn][key] = proj[1][key][0].decode(
+                            )
+        return ldap_projects
+
+    def get_os_projects(self):
         self._os_auth()
         os_projects = self.keystone.projects.list()
-        self.projects_from_os = []
+        self.os_projects = []
         for project in os_projects:
-            if not project.enabled:
-                self.projects_from_os.append(project.name)
+            project_dict = {
+                "name": project.name,
+                "id": project.id,
+                "enabled": project.enabled
+            }
+            self.os_projects.append(project_dict)
 
     def _get_credentials(self):
         """
@@ -179,24 +216,199 @@ class check_closed_projects:
             session=self.keystone_session)
         self.keystone = keystoneclient_v3.Client(
             session=self.keystone_session)
+        self.nova = nova.Client("2.1", session=self.keystone_session)
+        self.neutron = neutron.Client("2.0", session=self.keystone_session)
+        self.cinder = cinder.Client("3", session=self.keystone_session)
+        self.glance = glance.Client("3", session=self.keystone_session)
 
     def compare_projects(self):
-        self._log.debug(f"Comparing {len(self.projects_from_os)} projects \
-from OpenStack with {len(self.projects_from_ldap)} projects from LDAP...")
+        self.compare_ldap_vs_os()
+        if self.projects_file is None:
+            self.compare_os_vs_ldap()
+        else:
+            self.os_projects = self.os_projects_not_disabled
+        self.check_os_projects_resources()
+
+    def compare_os_vs_ldap(self):
+        self._log.debug(f"Comparing {len(self.os_projects)} projects \
+from OpenStack with {len(self.ldap_projects)} projects from LDAP (there might \
+be duplicated if you indicated several id attributes)...")
         not_closed = 0
         state = self.state_attribute
-        for project in self.projects_from_os:
-            if project not in self.projects_from_ldap:
-                self._log.warning(f"Project '{project}' closed in OpenStack \
-is not in LDAP")
-            elif self.projects_from_ldap[project][state] != 'closed':
-                self._log.warning(f"Project '{project}' closed in Openstack \
-is not closed in LDAP")
+        for os_project in self.os_projects:
+            if (os_project['name'] not in self.ldap_projects and
+               self.projects_file is None):
+                self._log.warning(f"Project '{os_project['name']}' disabled in \
+OpenStack is not in LDAP")
+            elif (os_project['name'] in self.ldap_projects and
+                  self.ldap_projects[os_project['name']][state] != 'closed'):
+                self._log.warning(f"Project '{os_project['name']}' disabled in \
+Openstack is not closed in LDAP")
                 not_closed += 1
+            elif os_project['name'] not in self.ldap_projects:
+                self._log.debug("Ignoring project...")
+            else:
+                self._log.debug(f"Opentack Project '{os_project['name']}' \
+it's closed in LDAP ({self.ldap_projects[os_project['name']][state]}).")
         if not_closed == 0:
             self._log.info('All projects are closed in LDAP.')
         else:
             self._log.info(f"{not_closed} projects are not closed in LDAP.")
+
+    def compare_ldap_vs_os(self):
+        self._log.debug("Comparing from LDAP to OpenStack...")
+        not_disabled = list()
+        state = self.state_attribute
+        for ldap_project in self.ldap_projects:
+            if self.ldap_projects[ldap_project][state] == "closed":
+                for os_project in self.os_projects:
+                    if (ldap_project in os_project['name'] and
+                       os_project['enabled']):
+                        if os_project not in not_disabled:
+                            not_disabled.append(os_project)
+        if len(not_disabled) == 0:
+            self._log.info('All closed LDAP projects are disabled in \
+OpenStack.')
+        else:
+            for os_project in not_disabled:
+                self._log.warning(f"OpenStack project '{os_project['name']}' \
+closed in LDAP is not disabled in OpenStack")
+            self._log.warning(f"{len(not_disabled)} projects from LDAP are not \
+disabled in OpenStack.")
+        self.os_projects_not_disabled = not_disabled
+
+    def check_os_projects_resources(self):
+        self._log.debug('Checking disabled projects in OpenStack for resources \
+used...')
+        for os_project in self.os_projects:
+            self._log.debug(f"Checking project '{os_project['name']}' \
+({os_project['id']})...")
+            if self.projects_file is not None or not os_project['enabled']:
+                search_opts = {
+                    "project_id": os_project['id'],
+                    "all_tenants": True
+                }
+
+                self._log.debug('Checking servers...')
+                servers = self._get_os_instances(search_opts=search_opts)
+                if len(servers) > 0:
+                    self._log.warning(f"{len(servers)} servers in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking volumes...')
+                volumes = self._get_os_volumes(search_opts=search_opts)
+                if len(volumes) > 0:
+                    self._log.debug('Checking snapshots...')
+                snapshots = self._get_os_snapshots(search_opts=search_opts)
+                if len(snapshots) > 0:
+                    self._log.warning(f"{len(snapshots)} snapshots in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking images...')
+                images = self._get_os_images(owner=os_project['id'])
+                if len(images) > 0:
+                    self._log.warning(f"{len(images)} images in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking floating IPs...')
+                ips = self._get_os_floating_ip(project_id=os_project['id'])
+                if len(ips) > 0:
+                    self._log.warning(f"{len(ips)} IPs in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking security groups...')
+                sec_grps = self._get_os_security_groups(
+                    project_id=os_project['id']
+                )
+                if len(sec_grps) > 1:
+                    self._log.warning(f"{len(sec_grps)} security groups in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking routers...')
+                routers = self._get_os_routers(project_id=os_project['id'])
+                if len(routers) > 0:
+                    self._log.warning(f"{len(routers)} routers in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking networks...')
+                networks = self._get_os_networks(project_id=os_project['id'])
+                if len(networks) > 0:
+                    self._log.warning(f"{len(networks)} networks in disabled \
+project {os_project['name']} ({os_project['id']})")
+
+                self._log.debug('Checking roles...')
+                roles = self._get_os_roles(project_id=os_project['id'])
+                if len(roles) > 0:
+                    self._log.warning(f"{len(roles)} roles in disabled \
+project {os_project['name']} ({os_project['id']}): \
+{', '.join(roles)}")
+
+    def _get_os_instances(self, search_opts={"all_tenants": True}):
+        server_list = self.nova.servers.list(detailed=True,
+                                             search_opts=search_opts)
+        return server_list
+
+    def _get_os_volumes(self, search_opts={"all_tenants": True}):
+        vols_list = self.cinder.volumes.list(detailed=True,
+                                             search_opts=search_opts)
+        return vols_list
+
+    def _get_os_snapshots(self, search_opts={"all_tenants": True}):
+        snaps_list = self.cinder.volume_snapshots.list(detailed=True,
+                                                       search_opts=search_opts)
+        return snaps_list
+
+    def _get_os_images(self, owner=None):
+        if self.images is None:
+            self._log.debug('First time fetching all images, and caching them \
+in memory...')
+            images = self.glance.images.list()
+            self.images = images
+        else:
+            images = self.images
+        images_list = list()
+        for image in images:
+            if owner and image['owner'] == owner:
+                images_list.append(image)
+        return images_list
+
+    def _get_os_floating_ip(self, project_id=None):
+        if self.ips is None:
+            self._log.debug('First time fetching all floating IPs, and caching \
+them in memory...')
+            all_floating_ips = self.neutron.list_floatingips()['floatingips']
+            self.ips = all_floating_ips
+        else:
+            all_floating_ips = self.ips
+        ips = list()
+        for ip in all_floating_ips:
+            if project_id and ip['project_id'] == project_id:
+                ips.appen(ip)
+        return ips
+
+    def _get_os_security_groups(self, project_id=None):
+        sg_list = self.neutron.list_security_groups(
+            tenant_id=project_id
+        )['security_groups']
+        return sg_list
+
+    def _get_os_routers(self, project_id=None):
+        routers_list = self.neutron.list_routers(
+            tenant_id=project_id
+        )['routers']
+        return routers_list
+
+    def _get_os_networks(self, project_id=None):
+        networks_list = self.neutron.list_networks(
+            tenant_id=project_id
+        )['networks']
+        return networks_list
+
+    def _get_os_roles(self, project_id=None):
+        roles_list = list()
+        for role in self.keystone.roles.list(project=project_id):
+            roles_list.append(role.name)
+        return roles_list
 
     def _get_home_folder(self):
         home_folder = os.getcwd()
@@ -268,17 +480,20 @@ and use a configuration file for this LDAP user password.''')
               help='LDAP search filter to use.')
 @click.option('--ldap-state-attribute', '-a', default='state',
               help='LDAP attribute that indicate the closed state.')
+@click.option('--ldap-id-attributes', '-i', default=['cn'], multiple=True,
+              help='''LDAP attribute(s) used to uniquely identify projects in
+LDAP.''')
 @click.option('--projects-file', '-o', required=False,
               help='''File with a list of project names as shown in LDAP."''')
 @click_config_file.configuration_option()
 def __main__(debug_level, log_file, os_source_file, ldap_host, ldap_port,
              ldap_user, ldap_password, ldap_base_dn, ldap_search_filter,
-             ldap_state_attribute, projects_file):
+             ldap_state_attribute, ldap_id_attributes, projects_file):
     return check_closed_projects(debug_level, log_file, os_source_file,
                                  ldap_host, ldap_port, ldap_user,
                                  ldap_password, ldap_base_dn,
                                  ldap_search_filter, ldap_state_attribute,
-                                 projects_file)
+                                 ldap_id_attributes, projects_file)
 
 
 if __name__ == "__main__":
