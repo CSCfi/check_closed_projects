@@ -240,16 +240,16 @@ be duplicated if you indicated several id attributes)...")
         state = self.state_attribute
         for os_project in self.os_projects:
             if (os_project['name'] not in self.ldap_projects and
-               self.projects_file is None):
+               self.projects_file is None and
+               not os_project['enabled']):
                 self._log.warning(f"Project '{os_project['name']}' disabled in \
-OpenStack is not in LDAP")
+OpenStack is not present in LDAP")
             elif (os_project['name'] in self.ldap_projects and
-                  self.ldap_projects[os_project['name']][state] != 'closed'):
+                  self.ldap_projects[os_project['name']][state] != 'closed' and
+                  not os_project['enabled']):
                 self._log.warning(f"Project '{os_project['name']}' disabled in \
 Openstack is not closed in LDAP")
                 not_closed.append(self.ldap_projects[os_project['name']])
-            elif os_project['name'] not in self.ldap_projects:
-                self._log.debug("Ignoring project...")
 #             else:
 #                 self._log.debug(f"Opentack Project '{os_project['name']}' \
 # it's closed in LDAP ({self.ldap_projects[os_project['name']][state]}).")
