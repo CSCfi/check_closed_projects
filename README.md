@@ -1,6 +1,6 @@
 # Check closed projects
 
-Compare closed projects in LDAP with a list of projects or with closed projects in OpenStack.
+Report closed projects in LDAP with a list of projects or with closed projects in OpenStack.
 
 ## Requirements
 
