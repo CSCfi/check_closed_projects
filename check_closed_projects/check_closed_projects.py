@@ -344,12 +344,14 @@ the commands, execute them and then try again to remove resources.")
                 # or the project is not enabled in OpenStack
                 if self.projects_file is not None or not os_project['enabled']:
                     self._log.debug(f"Checking project '{os_project['name']}' \
-    ({os_project['id']})...")
+({os_project['id']})...")
                     search_opts = {
                         "project_id": os_project['id'],
                         "all_tenants": True
                     }
                     discrepancies = {}
+                    commands_file.write(f"# Resources in project \
+{os_project['name']} ({os_project['id']})\n")
 
                     self._log.debug('Checking role assignments...')
                     roles = self._get_os_roles_assignments(
@@ -378,6 +380,8 @@ project {os_project['name']} ({os_project['id']})")
                             else:
                                 commands_file.write(f"openstack server stop \
 {server['id']} # OpenStack state '{server['OS-EXT-STS:vm_state']}'\n")
+                                commands_file.write(f"openstack server set \
+--state error {server['id']}'\n")
 
                     self._log.debug('Checking volumes...')
                     volumes = self._get_os_volumes(search_opts=search_opts)
@@ -472,6 +476,9 @@ remove port {router['id']} {port['id']}\n")
                     if not self.generate_deletion_command:
                         commands_file.write(f"openstack project set --disable \
 {os_project['id']}\n")
+                    else:
+                        commands_file.write("# curl to the API to set the \
+deleted_data flag into the project in IdM/LDAP. Once the process is ready.")
 
                     if len(discrepancies) > 0:
                         discrepancies['project_name'] = os_project['name']
@@ -682,7 +689,7 @@ with project id. Attention! Files will be overwritten.''')
               default='stop_servers_disable_projects_commands.sh',
               help='File to write the commands to stop all servers and disable \
 OpenStack projects that are closed in LDAP.')
-@click.option('--removal-commands-file', '-c',
+@click.option('--removal-commands-file', '-x',
               default='remove_resources_commands.sh',
               help='File to write the commands to remove the resources of \
 OpenStack projects that are closed in LDAP.')
