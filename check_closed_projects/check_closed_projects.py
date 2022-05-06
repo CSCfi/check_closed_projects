@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- encoding: utf-8 -*-
 #
-# This script is licensed under GNU GPL version 2.0 or above
-# (c) 2022 Antonio J. Delgado
+# (c) 2022 CSC ( Antonio J. Delgado )
 # Check closed projects in LDAP and compare with Openstack
 
 import sys
